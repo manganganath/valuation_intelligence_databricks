@@ -1,0 +1,34 @@
+# Valuation Intelligence Agent — Central Configuration
+# All resource IDs, credentials, and settings in one place.
+
+# Unity Catalog
+catalog: YOUR_CATALOG
+schema: vi_demo
+
+# LLM
+model: databricks-claude-sonnet-4-6
+
+# Tool resource IDs
+knowledge_assistant_id: YOUR_KA_ENDPOINT
+genie_space_id: YOUR_GENIE_SPACE_ID
+sql_warehouse_id: YOUR_SQL_WAREHOUSE_ID
+
+# Vector Search
+vs_endpoint: vi-vs-endpoint
+
+# Lakebase
+lakebase_host: YOUR_LAKEBASE_HOST
+lakebase_db: vi_agent
+lakebase_user: vi_app_user
+lakebase_password: YOUR_LAKEBASE_PASSWORD
+
+# MLflow
+mlflow_experiment: /Shared/vi_demo/vi_demo
+mlflow_experiment_id: "YOUR_MLFLOW_EXPERIMENT_ID"
+
+# App Service Principal
+app_sp_client_id: YOUR_APP_SP_CLIENT_ID
+
+# Workspace
+workspace_host: https://YOUR_WORKSPACE.cloud.databricks.com
+cli_profile: YOUR_PROFILE

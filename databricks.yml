@@ -1,0 +1,71 @@
+bundle:
+  name: valuation_intelligence
+
+workspace:
+  host: https://YOUR_WORKSPACE.cloud.databricks.com
+  profile: YOUR_PROFILE
+
+resources:
+  jobs:
+    setup_pipeline:
+      name: "VI Agent - Setup Pipeline"
+      tasks:
+        - task_key: setup_uc_functions
+          notebook_task:
+            notebook_path: src/01_setup_uc_functions.py
+            source: WORKSPACE
+          environment_key: default
+
+        - task_key: setup_vector_search
+          notebook_task:
+            notebook_path: src/02_setup_vector_search.py
+            source: WORKSPACE
+          depends_on:
+            - task_key: setup_uc_functions
+          environment_key: default
+
+        - task_key: setup_lakebase
+          notebook_task:
+            notebook_path: src/03_setup_lakebase.py
+            source: WORKSPACE
+          depends_on:
+            - task_key: setup_vector_search
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+
+    evaluation:
+      name: "VI Agent - Evaluation"
+      tasks:
+        - task_key: run_evaluation
+          notebook_task:
+            notebook_path: src/04_evaluation.py
+            source: WORKSPACE
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+
+    monitoring:
+      name: "VI Agent - Monitoring"
+      tasks:
+        - task_key: run_monitoring
+          notebook_task:
+            notebook_path: src/05_monitoring.py
+            source: WORKSPACE
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+
+sync:
+  paths:
+    - app
+    - src
