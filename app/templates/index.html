@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Valuation Intelligence Agent</title>
+    <link rel="stylesheet" href="/static/style.css?v={{ cache_bust }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-title">
+                <h1>Valuation Intelligence Agent</h1>
+                <p>AI-powered valuation analysis for institutional portfolios</p>
+            </div>
+            <button id="toggle-trace-btn" class="btn-icon" title="Toggle Agent Trace">☰</button>
+        </header>
+
+        <div class="app-body">
+            <!-- Left Panel: Session History -->
+            <aside class="panel-left">
+                <div class="panel-header">
+                    <h3>Sessions</h3>
+                    <button id="new-session-btn" class="btn-icon" title="New Session">+</button>
+                </div>
+                <div id="session-list" class="session-list">
+                </div>
+            </aside>
+
+            <!-- Center Panel: Chat -->
+            <main class="panel-center">
+                <div id="chat-area" class="chat-area">
+                    <!-- Empty state -->
+                    <div id="empty-state" class="empty-state">
+                        <div class="empty-icon">📊</div>
+                        <h2>Ask a valuation question</h2>
+                        <p>Select a company to get started, or type your own question.</p>
+                        <div class="preset-chips">
+                            {% for p in presets %}
+                            <button class="chip" data-query="{{ p.query }}">{{ p.name }}</button>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <!-- Messages will be appended here -->
+                    <div id="messages" class="messages"></div>
+                </div>
+
+                <!-- Input Bar -->
+                <div class="input-bar">
+                    <textarea id="query-input"
+                              placeholder="Ask a valuation question..."
+                              rows="1"></textarea>
+                    <button id="send-btn" class="btn-send" title="Send (Ctrl+Enter)">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13"/>
+                        </svg>
+                    </button>
+                </div>
+            </main>
+
+            <!-- Right Panel: Agent Trace -->
+            <aside id="trace-panel" class="panel-right hidden">
+                <div class="panel-header">
+                    <h3>Agent Trace</h3>
+                </div>
+                <div id="trace-steps" class="trace-steps"></div>
+            </aside>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        const SESSION_ID = "{{ session_id }}";
+    </script>
+    <script src="/static/app.js?v={{ cache_bust }}"></script>
+</body>
+</html>
