@@ -8,36 +8,60 @@ A fund manager asks a natural-language valuation question. The agent retrieves f
 
 ```mermaid
 graph TB
-    subgraph "Databricks App"
+    subgraph APP["Databricks App"]
         UI["FastAPI + Jinja2<br/>3-Panel UI"]
+        AppPy["app.py<br/>(orchestrator)"]
         Agent["Agent Loop<br/>(agent.py)"]
         Session["Session Manager<br/>(session.py)"]
     end
 
-    subgraph "Databricks Platform"
+    subgraph AGENTBRICKS["Agent Bricks"]
+        Gateway["Unity AI Gateway<br/>(rate limiting, payload logging, usage tracking)"]
         LLM["Claude Sonnet 4.6<br/>(FM API)"]
-        Genie["Genie Space<br/>(company_financials)"]
-        KA["Knowledge Assistant<br/>(research_documents)"]
+        Genie["Genie Space<br/>(Natural Language SQL)"]
+        KA["Knowledge Assistant<br/>(Vector Search RAG)"]
+        VS["Vector Search<br/>(databricks-gte-large-en)"]
         UCFunc["UC Function<br/>(get_risk_assessment)"]
-        VS["Vector Search<br/>(research_documents_index)"]
+        MLflow["MLflow<br/>(tracing, evaluation, monitoring)"]
+        Scorers["Registered Scorers<br/>(RelevanceToQuery, Safety)"]
     end
 
-    subgraph "Storage"
-        Lakebase["Lakebase PostgreSQL<br/>(threads + messages + memories)"]
-        UC["Unity Catalog<br/>(tables, functions, volumes)"]
-        MLflow["MLflow Experiment<br/>(traces + assessments)"]
+    subgraph LAKEHOUSE["Lakehouse"]
+        Financials[("company_financials<br/>(15 companies)")]
+        Research[("research_documents<br/>(~200 chunks)")]
+        VSIndex[("research_documents_index<br/>(Delta Sync)")]
+        EvalData[("eval_dataset<br/>(20 Q&A pairs)")]
+        TracesTable[("Traces Table")]
+        InfTable[("Inference Tables")]
     end
 
-    UI -->|"SSE Stream"| Agent
-    Agent -->|"Chat Completions"| LLM
+    subgraph LAKEBASE["Lakebase"]
+        Threads[("threads<br/>(short-term memory)")]
+        Messages[("messages<br/>(conversation history)")]
+        Memories[("memories<br/>(long-term memory)")]
+    end
+
+    UI -->|"SSE Stream"| AppPy
+    AppPy -->|"get_history / get_memories"| Session
+    AppPy -->|"call_agent_stream"| Agent
+    AppPy -->|"add_message / store_memory"| Session
+    Agent -->|"OpenAI Client"| Gateway
+    Gateway --> LLM
     LLM -->|"tool_calls"| Agent
-    Agent -->|"Natural Language SQL"| Genie
-    Agent -->|"Vector Search RAG"| KA
-    Agent -->|"SQL Statement API"| UCFunc
+    Agent -->|"NL SQL"| Genie
+    Agent -->|"RAG"| KA
+    Agent -->|"SQL API"| UCFunc
+    Genie --> Financials
     KA --> VS
-    UI --> Session
-    Session --> Lakebase
+    VS --> VSIndex
+    VSIndex -.-> Research
     Agent -->|"@mlflow.trace"| MLflow
+    MLflow --> TracesTable
+    Gateway --> InfTable
+    Scorers -->|"auto-score"| MLflow
+    Session --> Threads
+    Session --> Messages
+    Session --> Memories
 ```
 
 ## Agent Loop
@@ -236,7 +260,7 @@ databricks bundle run monitoring --profile YOUR_PROFILE
 
 | # | Capability | How Used |
 |---|-----------|----------|
-| 1 | **Foundation Model API** | Claude Sonnet 4.6 via Chat Completions |
+| 1 | **Foundation Model API** | Claude Sonnet 4.6 via OpenAI client through Unity AI Gateway |
 | 2 | **Genie Space** | Natural language SQL over financial data |
 | 3 | **Knowledge Assistant** | Vector search RAG over research documents |
 | 4 | **Vector Search** | Embedding-based retrieval (databricks-gte-large-en) |
@@ -245,4 +269,5 @@ databricks bundle run monitoring --profile YOUR_PROFILE
 | 7 | **Lakebase** | PostgreSQL for conversation memory |
 | 8 | **MLflow Tracing** | Agent-level observability |
 | 9 | **MLflow Evaluate** | LLM-as-a-Judge quality scoring |
-| 10 | **DAB** | Infrastructure-as-code deployment |
+| 10 | **Unity AI Gateway** | Rate limiting, payload logging, usage tracking |
+| 11 | **DAB** | Infrastructure-as-code deployment |

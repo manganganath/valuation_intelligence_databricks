@@ -15,6 +15,7 @@ import mlflow
 import requests
 from databricks.sdk import WorkspaceClient
 from mlflow.entities import SpanType
+from openai import OpenAI
 
 from config import (
     AGENT_SYSTEM_PROMPT,
@@ -75,27 +76,47 @@ TOOLS = [
 
 MAX_TOOL_ROUNDS = 5
 
-# Reusable HTTP session for connection pooling
+# Reusable HTTP session for tool calls (Genie, KA, SQL)
 _http_session = requests.Session()
 _http_session.headers.update({"Content-Type": "application/json"})
 
-# Cached auth
+# Cached state
 _cached_auth = {"headers": None, "host": None, "expires": 0}
+_openai_client = None
+
+
+def _get_openai_client() -> OpenAI:
+    """Get OpenAI client configured for Databricks AI Gateway."""
+    global _openai_client
+    if _openai_client:
+        return _openai_client
+
+    w = WorkspaceClient()
+    host = w.config.host.rstrip("/")
+    token = w.config.authenticate()
+    api_key = token.get("Authorization", "").replace("Bearer ", "")
+
+    _openai_client = OpenAI(
+        api_key=api_key,
+        base_url=f"{host}/serving-endpoints",
+    )
+    # Cache host for tool calls
+    _cached_auth["host"] = host
+    return _openai_client
 
 
 def _get_auth_headers() -> dict:
-    """Get auth headers with caching (refresh every 30 min)."""
+    """Get auth headers for tool calls (Genie, KA, SQL)."""
     now = time.time()
     if _cached_auth["headers"] and now < _cached_auth["expires"]:
         return dict(_cached_auth["headers"])
 
     w = WorkspaceClient()
-    header_factory = w.config.authenticate
-    headers = header_factory()
+    headers = w.config.authenticate()
     headers["Content-Type"] = "application/json"
     _cached_auth["headers"] = headers
     _cached_auth["host"] = w.config.host.rstrip("/")
-    _cached_auth["expires"] = now + 1800  # 30 min
+    _cached_auth["expires"] = now + 1800
     return dict(headers)
 
 
@@ -110,13 +131,19 @@ def _get_host() -> str:
 
 
 def _call_llm(messages: list[dict], headers: dict, stream: bool = False):
-    url = f"{_get_host()}/serving-endpoints/{MODEL}/invocations"
-    payload = {"messages": messages, "max_tokens": 4096, "tools": TOOLS, "tool_choice": "auto", "stream": stream}
-    resp = _http_session.post(url, headers=headers, json=payload, timeout=180, stream=stream)
-    resp.raise_for_status()
+    """Call LLM via OpenAI client through Unity AI Gateway."""
+    client = _get_openai_client()
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        max_tokens=4096,
+        tools=TOOLS,
+        tool_choice="auto",
+        stream=stream,
+    )
     if stream:
-        return resp
-    return resp.json()
+        return response
+    return response
 
 
 # --- Tool Implementations ---
@@ -278,38 +305,36 @@ def _extract_memories(user_message: str, assistant_response: str, headers: dict)
 
 
 def _stream_final_response(messages: list[dict], headers: dict, response_id: str) -> Generator[str, None, None]:
-    """Stream a final LLM response token-by-token."""
-    stream_resp = _call_llm(messages, headers, stream=True)
+    """Stream a final LLM response token-by-token via OpenAI client."""
+    stream = _call_llm(messages, headers, stream=True)
     full_content = ""
-    for line in stream_resp.iter_lines(decode_unicode=True):
-        if not line or not line.startswith("data: "):
-            continue
-        payload = line[6:]
-        if payload.strip() == "[DONE]":
-            break
-        try:
-            chunk = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        delta = chunk.get("choices", [{}])[0].get("delta", {})
-        response_id = chunk.get("id", response_id)
-        content_delta = delta.get("content", "")
-        if content_delta:
-            full_content += content_delta
-            yield _sse_event("token", {"text": content_delta})
-    stream_resp.close()
+    for chunk in stream:
+        response_id = chunk.id or response_id
+        if chunk.choices and chunk.choices[0].delta:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                full_content += delta.content
+                yield _sse_event("token", {"text": delta.content})
     yield _sse_event("done", {"content": full_content, "response_id": response_id})
 
 
-def _execute_tools_parallel(tool_calls: list[dict], headers: dict, host: str) -> list[tuple[str, str, dict, str]]:
+def _tc_to_dict(tc) -> dict:
+    """Convert a tool call (OpenAI object or dict) to a plain dict."""
+    if isinstance(tc, dict):
+        return tc
+    return {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+
+
+def _execute_tools_parallel(tool_calls: list, headers: dict, host: str) -> list[tuple[str, str, dict, str]]:
     """Execute multiple tool calls in parallel. Returns [(tool_call_id, tool_name, tool_args, result), ...]."""
     results = {}
+    tc_dicts = [_tc_to_dict(tc) for tc in tool_calls]
 
     def run_tool(tc):
-        func = tc.get("function", {})
-        tool_name = func.get("name", "")
+        func = tc["function"]
+        tool_name = func["name"]
         tool_args = json.loads(func.get("arguments", "{}"))
-        tool_call_id = tc.get("id", "")
+        tool_call_id = tc["id"]
         try:
             result = _execute_tool(tool_name, tool_args, headers, host)
         except Exception as e:
@@ -318,13 +343,12 @@ def _execute_tools_parallel(tool_calls: list[dict], headers: dict, host: str) ->
         return tool_call_id, tool_name, tool_args, result
 
     with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(run_tool, tc): tc for tc in tool_calls}
+        futures = {executor.submit(run_tool, tc): tc for tc in tc_dicts}
         for future in as_completed(futures):
             tool_call_id, tool_name, tool_args, result = future.result()
             results[tool_call_id] = (tool_call_id, tool_name, tool_args, result)
 
-    # Return in original order
-    return [results[tc.get("id", "")] for tc in tool_calls if tc.get("id", "") in results]
+    return [results[tc["id"]] for tc in tc_dicts if tc["id"] in results]
 
 
 def call_agent_stream(user_message: str, conversation_history: list[dict] | None = None, memories: list[dict] | None = None) -> Generator[str, None, None]:
@@ -341,22 +365,25 @@ def call_agent_stream(user_message: str, conversation_history: list[dict] | None
 
     try:
         for round_num in range(MAX_TOOL_ROUNDS):
-            data = _call_llm(messages, headers, stream=False)
-            response_id = data.get("id", response_id)
-            choice = data.get("choices", [{}])[0]
-            message = choice.get("message", {})
-            tool_calls = message.get("tool_calls", [])
+            resp = _call_llm(messages, headers, stream=False)
+            response_id = resp.id or response_id
+            choice = resp.choices[0]
+            message = choice.message
+            tool_calls = message.tool_calls or []
 
-            if not tool_calls or choice.get("finish_reason") == "stop":
+            if not tool_calls or choice.finish_reason == "stop":
                 yield from _stream_final_response(messages, headers, response_id)
                 return
 
-            messages.append(message)
+            # Convert message to dict for appending to messages list
+            msg_dict = {"role": "assistant", "content": message.content}
+            if tool_calls:
+                msg_dict["tool_calls"] = [_tc_to_dict(tc) for tc in tool_calls]
+            messages.append(msg_dict)
 
             # Emit all tool call traces first
             for tc in tool_calls:
-                func = tc.get("function", {})
-                yield _sse_event("trace", {"type": "tool_call", "label": func.get("name", ""), "data": func.get("arguments", "{}")})
+                yield _sse_event("trace", {"type": "tool_call", "label": tc.function.name, "data": tc.function.arguments})
 
             # Execute all tools in parallel
             results = _execute_tools_parallel(tool_calls, headers, host)
@@ -366,45 +393,34 @@ def call_agent_stream(user_message: str, conversation_history: list[dict] | None
                 yield _sse_event("trace", {"type": "tool_result", "label": tool_name, "data": result[:500]})
                 messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": result})
 
-            # Stream the next LLM response
-            stream_resp = _call_llm(messages, headers, stream=True)
+            # Stream the next LLM response via OpenAI client
+            stream = _call_llm(messages, headers, stream=True)
             full_content = ""
             has_tool_calls = False
             tc_buffer = {}
 
-            for line in stream_resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data: "):
+            for chunk in stream:
+                response_id = chunk.id or response_id
+                if not chunk.choices:
                     continue
-                payload = line[6:]
-                if payload.strip() == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
+                delta = chunk.choices[0].delta
 
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                response_id = chunk.get("id", response_id)
-
-                if delta.get("tool_calls"):
+                if delta and delta.tool_calls:
                     has_tool_calls = True
-                    for tcd in delta["tool_calls"]:
-                        idx = tcd.get("index", 0)
+                    for tcd in delta.tool_calls:
+                        idx = tcd.index or 0
                         if idx not in tc_buffer:
                             tc_buffer[idx] = {"id": "", "name": "", "arguments": ""}
-                        if tcd.get("id"):
-                            tc_buffer[idx]["id"] = tcd["id"]
-                        if tcd.get("function", {}).get("name"):
-                            tc_buffer[idx]["name"] = tcd["function"]["name"]
-                        if tcd.get("function", {}).get("arguments"):
-                            tc_buffer[idx]["arguments"] += tcd["function"]["arguments"]
+                        if tcd.id:
+                            tc_buffer[idx]["id"] = tcd.id
+                        if tcd.function and tcd.function.name:
+                            tc_buffer[idx]["name"] = tcd.function.name
+                        if tcd.function and tcd.function.arguments:
+                            tc_buffer[idx]["arguments"] += tcd.function.arguments
 
-                content_delta = delta.get("content", "")
-                if content_delta:
-                    full_content += content_delta
-                    yield _sse_event("token", {"text": content_delta})
-
-            stream_resp.close()
+                if delta and delta.content:
+                    full_content += delta.content
+                    yield _sse_event("token", {"text": delta.content})
 
             if has_tool_calls and tc_buffer:
                 assistant_msg = {"role": "assistant", "content": full_content or None, "tool_calls": [
